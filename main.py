@@ -36,21 +36,19 @@ def main():
     temperature = config.get("temperature", 0.1)
 
     analyze_images = config.get("analyze_images", True)
-    max_images_per_page = config.get("max_images_per_page", 2)
-    min_image_width = config.get("min_image_width", 300)
-    min_image_height = config.get("min_image_height", 200)
-    vision_workers = config.get("vision_workers", 2)
+    max_images_per_page = config.get("max_images_per_page", 1)
+    min_image_width = config.get("min_image_width", 500)
+    min_image_height = config.get("min_image_height", 300)
+    vision_workers = config.get("vision_workers", 1)
+    max_new_images_per_run = config.get("max_new_images_per_run", 10)
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
     images_dir = os.path.join(output_dir, "images")
-    if not os.path.exists(images_dir):
-        os.makedirs(images_dir)
+    os.makedirs(images_dir, exist_ok=True)
 
     image_cache_dir = os.path.join(output_dir, "image_cache")
-    if not os.path.exists(image_cache_dir):
-        os.makedirs(image_cache_dir)
+    os.makedirs(image_cache_dir, exist_ok=True)
 
     image_cache_file = os.path.join(image_cache_dir, "cache.json")
 
@@ -77,7 +75,8 @@ def main():
                     max_images_per_page=max_images_per_page,
                     min_image_width=min_image_width,
                     min_image_height=min_image_height,
-                    max_workers=vision_workers
+                    max_workers=vision_workers,
+                    max_new_images_per_run=max_new_images_per_run
                 )
 
     if os.path.exists(examples_dir):
@@ -95,7 +94,8 @@ def main():
                     max_images_per_page=max_images_per_page,
                     min_image_width=min_image_width,
                     min_image_height=min_image_height,
-                    max_workers=vision_workers
+                    max_workers=vision_workers,
+                    max_new_images_per_run=max_new_images_per_run
                 )
 
     initial_state = {
@@ -118,8 +118,10 @@ def main():
     }
 
     logging.info(
-        f"Запуск графа генерации ВКР... "
-        f"LLM={llm_model}, vision={vision_model}, analyze_images={analyze_images}"
+        "Запуск графа генерации ВКР... "
+        f"LLM={llm_model}, vision={vision_model}, "
+        f"analyze_images={analyze_images}, "
+        f"max_new_images_per_run={max_new_images_per_run}"
     )
 
     for output in app.stream(initial_state, config={"configurable": {"thread_id": "1"}}):

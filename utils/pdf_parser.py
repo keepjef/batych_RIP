@@ -17,6 +17,10 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _make_cache_key(image_hash: str, vision_model: str) -> str:
+    return f"{vision_model}::{image_hash}"
+
+
 def _load_cache(cache_file: Path) -> dict:
     if not cache_file.exists():
         return {}
@@ -32,8 +36,10 @@ def _load_cache(cache_file: Path) -> dict:
 def _save_cache(cache_file: Path, cache_data: dict):
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(cache_file, "w", encoding="utf-8") as f:
+        tmp_file = cache_file.with_suffix(".tmp")
+        with open(tmp_file, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
+        tmp_file.replace(cache_file)
     except Exception as e:
         logging.error(f"Не удалось сохранить кэш {cache_file}: {e}")
 
@@ -75,10 +81,11 @@ def extract_data_from_pdf(
     vision_model="llava",
     temperature=0.1,
     analyze_images=True,
-    max_images_per_page=2,
-    min_image_width=300,
-    min_image_height=200,
-    max_workers=2
+    max_images_per_page=1,
+    min_image_width=500,
+    min_image_height=300,
+    max_workers=1,
+    max_new_images_per_run=10
 ):
     file_path = Path(file_path).resolve()
     output_dir = Path(output_image_dir).resolve()
@@ -96,6 +103,10 @@ def extract_data_from_pdf(
     image_descriptions = []
     image_tasks = []
 
+    cached_count = 0
+    skipped_small_count = 0
+    skipped_limit_count = 0
+
     try:
         document = fitz.open(str(file_path))
     except Exception as e:
@@ -106,7 +117,6 @@ def extract_data_from_pdf(
         for page_num in range(len(document)):
             page = document.load_page(page_num)
 
-            # Извлечение текста
             try:
                 page_text = page.get_text()
                 if page_text and page_text.strip():
@@ -142,6 +152,7 @@ def extract_data_from_pdf(
                         continue
 
                     if width < min_image_width or height < min_image_height:
+                        skipped_small_count += 1
                         logging.info(
                             f"Пропуск маленького изображения: "
                             f"page={page_num + 1}, img={img_index}, size={width}x{height}"
@@ -149,11 +160,12 @@ def extract_data_from_pdf(
                         continue
 
                     image_hash = _sha256_bytes(image_bytes)
+                    cache_key = _make_cache_key(image_hash, vision_model)
 
-                    # Если изображение уже анализировалось, берём из кэша
-                    if image_hash in cache_data:
-                        cached_description = cache_data[image_hash].get("description", "")
+                    if cache_key in cache_data:
+                        cached_description = cache_data[cache_key].get("description", "")
                         if cached_description:
+                            cached_count += 1
                             logging.info(
                                 f"Описание изображения взято из кэша: "
                                 f"page={page_num + 1}, img={img_index}, hash={image_hash[:12]}"
@@ -162,19 +174,26 @@ def extract_data_from_pdf(
                                 f"\n[ИЗОБРАЖЕНИЕ: страница {page_num + 1}, индекс {img_index}]\n"
                                 f"{cached_description}"
                             )
+                            selected_count += 1
                             continue
+
+                    if len(image_tasks) >= max_new_images_per_run:
+                        skipped_limit_count += 1
+                        logging.info(
+                            f"Пропуск нового изображения из-за лимита за запуск: "
+                            f"page={page_num + 1}, img={img_index}"
+                        )
+                        continue
 
                     image_name = (
                         f"{file_path.stem}_page_{page_num + 1}_img_{img_index}_{image_hash[:12]}.{image_ext}"
                     )
                     image_path = output_dir / image_name
 
-                    with open(image_path, "wb") as img_file:
-                        img_file.write(image_bytes)
-
-                    logging.info(
-                        f"Изображение сохранено: {image_path} ({width}x{height})"
-                    )
+                    if not image_path.exists():
+                        with open(image_path, "wb") as img_file:
+                            img_file.write(image_bytes)
+                        logging.info(f"Изображение сохранено: {image_path} ({width}x{height})")
 
                     image_tasks.append(
                         {
@@ -182,6 +201,7 @@ def extract_data_from_pdf(
                             "page_num": page_num,
                             "img_index": img_index,
                             "image_hash": image_hash,
+                            "cache_key": cache_key,
                             "width": width,
                             "height": height
                         }
@@ -198,11 +218,21 @@ def extract_data_from_pdf(
     finally:
         document.close()
 
+    total_new = len(image_tasks)
+
+    logging.info(
+        f"PDF обработан: кэш={cached_count}, новых={total_new}, "
+        f"пропущено маленьких={skipped_small_count}, "
+        f"пропущено по лимиту={skipped_limit_count}"
+    )
+
     if analyze_images and image_tasks:
         logging.info(
             f"Запуск анализа новых изображений. "
-            f"Всего новых задач: {len(image_tasks)}, workers={max_workers}"
+            f"Всего новых задач: {total_new}, workers={max_workers}"
         )
+
+        completed = 0
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {
@@ -219,6 +249,7 @@ def extract_data_from_pdf(
 
             for future in as_completed(future_map):
                 task = future_map[future]
+                completed += 1
 
                 try:
                     result = future.result()
@@ -231,7 +262,7 @@ def extract_data_from_pdf(
                         )
 
                         with _cache_lock:
-                            cache_data[task["image_hash"]] = {
+                            cache_data[task["cache_key"]] = {
                                 "description": description,
                                 "source_file": str(file_path),
                                 "page": result["page_num"] + 1,
@@ -239,25 +270,25 @@ def extract_data_from_pdf(
                                 "image_path": str(task["image_path"]),
                                 "width": task["width"],
                                 "height": task["height"],
-                                "vision_model": vision_model
+                                "vision_model": vision_model,
+                                "image_hash": task["image_hash"]
                             }
+                            _save_cache(cache_path, cache_data)
 
                         logging.info(
-                            f"Описание сохранено в кэш: "
+                            f"[{completed}/{total_new}] Описание сохранено в кэш: "
                             f"page={result['page_num'] + 1}, "
                             f"img={result['img_index']}, "
                             f"hash={task['image_hash'][:12]}"
                         )
                     else:
                         logging.warning(
-                            f"Не удалось получить описание изображения: "
+                            f"[{completed}/{total_new}] Не удалось получить описание изображения: "
                             f"{task['image_path']} -> {description}"
                         )
 
                 except Exception as e:
-                    logging.warning(f"Ошибка в задаче анализа изображения: {e}")
-
-        _save_cache(cache_path, cache_data)
+                    logging.warning(f"[{completed}/{total_new}] Ошибка в задаче анализа изображения: {e}")
 
     result_parts = []
 
