@@ -1,0 +1,7 @@
+PyYAML
+langgraph
+langchain
+python-docx
+PyMuPDF
+requests
+reportlab

@@ -1,9 +1,17 @@
-llm_model: "llama3"
+llm_model: "qwen2.5:14b"
 vision_model: "llava"
 temperature: 0.1
+
 input_main: "data/input/main"
 input_control: "data/input/control"
 input_examples: "data/input/examples"
 output_path: "data/output"
+
 human_mode: false
 max_iterations: 10
+
+analyze_images: true
+max_images_per_page: 2
+min_image_width: 300
+min_image_height: 200
+vision_workers: 2
